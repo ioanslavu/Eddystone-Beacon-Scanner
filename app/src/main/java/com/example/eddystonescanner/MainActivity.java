@@ -1,0 +1,245 @@
+package com.example.eddystonescanner;
+
+import androidx.activity.result.ActivityResultCallback;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
+import androidx.lifecycle.Observer;
+
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.os.Bundle;
+import android.util.Log;
+import android.widget.Button;
+import android.widget.TextView;
+
+import com.neovisionaries.bluetooth.ble.advertising.ADPayloadParser;
+import com.neovisionaries.bluetooth.ble.advertising.ADStructure;
+import com.neovisionaries.bluetooth.ble.advertising.EddystoneTLM;
+import com.neovisionaries.bluetooth.ble.advertising.EddystoneUID;
+import com.neovisionaries.bluetooth.ble.advertising.EddystoneURL;
+
+import org.altbeacon.beacon.Beacon;
+import org.altbeacon.beacon.BeaconConsumer;
+import org.altbeacon.beacon.BeaconManager;
+import org.altbeacon.beacon.BeaconParser;
+import org.altbeacon.beacon.Identifier;
+import org.altbeacon.beacon.MonitorNotifier;
+import org.altbeacon.beacon.Region;
+import org.altbeacon.beacon.utils.UrlBeaconUrlCompressor;
+
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+
+public class MainActivity extends AppCompatActivity {
+
+    private BeaconManager beaconManager;
+    private static final String TAG = "MainActivity";
+    private static final int PERMISSION_REQUESTS = 1;
+    TextView logger;
+    Region myRegion;
+    Button bscan;
+    List<Beacon> uuids = new ArrayList();
+    TextView noBeacons;
+    boolean enable = false;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        bscan = findViewById(R.id.button2);
+        bscan.setOnClickListener(v -> {
+            scan();
+        });
+        logger = findViewById(R.id.logger);
+        noBeacons =  (TextView)  findViewById(R.id.textView2);
+        logthis("App Starting");
+        //check for permissions and start the beacons.
+        beaconManager = BeaconManager.getInstanceForApplication(this);
+        //added eddystone, since I'm moving from google's beacons to altbeacon.  RedBeacon can broadcast both.
+        // Detect the main identifier (UID) frame:
+        beaconManager.getBeaconParsers().add(new BeaconParser().setBeaconLayout(BeaconParser.EDDYSTONE_UID_LAYOUT));
+        // Detect the telemetry (TLM) frame:
+        beaconManager.getBeaconParsers().add(new BeaconParser().setBeaconLayout(BeaconParser.EDDYSTONE_TLM_LAYOUT));
+        // Detect the URL frame:
+        beaconManager.getBeaconParsers().add(new BeaconParser().setBeaconLayout(BeaconParser.EDDYSTONE_URL_LAYOUT));
+        //Parse IBeacon structure
+        beaconManager.getBeaconParsers().add(new BeaconParser().
+                setBeaconLayout("m:2-3=0215,i:4-19,i:20-21,i:22-23,p:24-24"));
+        beaconManager.getBeaconParsers().add(new BeaconParser().
+                setBeaconLayout("x,s:0-1=feaa,m:2-2=20,d:3-3,d:4-5,d:6-7,d:8-11,d:12-15"));
+        checkpermissions();
+
+    }
+
+    void scan(){
+        if(!enable){
+            startexample();
+            enable = true;
+            bscan.setText("Scanning...");
+            uuids.clear();
+            logger.setText("");
+        }
+        else{
+            stopScan();
+            enable = false;
+            bscan.setText("Scan");
+        }
+    }
+
+    void stopScan(){
+        beaconManager.stopMonitoring( myRegion );
+        beaconManager.stopRangingBeacons( myRegion );
+    }
+
+    void startexample() {
+        logthis("Starting up!");
+        // Set up a Live Data observer so this Activity can get monitoring callbacks
+        // observer will be called each time the monitored regionState changes (inside vs. outside region)
+        myRegion = new Region( "all-beacons-region", null, null, null);
+        //first the monitor
+        logthis("beacon monitor observer has been added.");
+        beaconManager.getRegionViewModel(myRegion).getRegionState().observe(this, new Observer<Integer>() {
+                    @Override
+                    public void onChanged(Integer state) {
+                        if (state == MonitorNotifier.INSIDE) {
+                            Log.d(TAG, "Detected beacons(s)");
+                            logthis("I can see at least one beacon");
+                        }
+                        else {
+                            Log.d(TAG, "Stopped detecting beacons");
+                            logthis("I no longer see an beacon");
+
+                        }
+                    }
+                }
+        );
+        beaconManager.startMonitoring(myRegion);
+
+        //now the ranged information.
+        logthis("beacon range observer has been added.");
+
+        beaconManager.getRegionViewModel(myRegion).getRangedBeacons().observe(this, new Observer<Collection<Beacon>>() {
+            @Override
+            public void onChanged(Collection<Beacon> beacons) {
+//                logthis("didRangeBeaconsInRegion called with beacon count:  " + beacons.size());
+                noBeacons.setText(String.valueOf(beacons.size()));
+
+                for (Beacon beacon : beacons) {
+                        if(uuids.contains(beacon))
+                            continue;
+                        uuids.add(beacon);
+                        if (beacon.getServiceUuid() == 0xfeaa && beacon.getBeaconTypeCode() == 0x00) {
+                        // This is a Eddystone-UID frame
+                        Identifier namespaceId = beacon.getId1();
+                        Identifier instanceId = beacon.getId2();
+                        logthis("I see a beacon transmitting namespace id: " + namespaceId +
+                                " and instance id: " + instanceId +
+                                " approximately " + beacon.getDistance() + " meters away.");
+
+                        // Do we have telemetry data?
+                        if (beacon.getExtraDataFields().size() > 0) {
+                            long telemetryVersion = beacon.getExtraDataFields().get(0);
+                            long unsignedTemp = (beacon.getExtraDataFields().get(2) >> 8);
+                            long batteryMilliVolts = beacon.getExtraDataFields().get(1);
+                            long pduCount = beacon.getExtraDataFields().get(3);
+                            long uptime = beacon.getExtraDataFields().get(4);
+                            double temperature = unsignedTemp > 128 ? unsignedTemp - 256 : unsignedTemp + (beacon.getExtraDataFields().get(2) & 0xff) / 256.0;
+                            logthis(
+                                    "The above beacon is sending telemetry version " + telemetryVersion +
+                                            ", has been up for : " + uptime + " seconds" +
+                                            ", has a battery level of " + batteryMilliVolts + " mV" +
+                                            ", and has transmitted " + pduCount + " advertisements."+
+                                            "temp " + temperature);
+
+                        }
+
+                    } else if (beacon.getServiceUuid() == 0xfeaa && beacon.getBeaconTypeCode() == 0x10) {
+                        // This is a Eddystone-URL frame
+                        String url = UrlBeaconUrlCompressor.uncompress(beacon.getId1().toByteArray());
+                        logthis("I see a beacon transmitting a url: " + url +
+                                " approximately " + beacon.getDistance() + " meters away.");
+                    }else if (beacon.getServiceUuid() == 0xfeaa && beacon.getBeaconTypeCode() == 0x20) {
+                            // This is a Eddystone-TLM frame
+                            long unsignedTemp = (beacon.getExtraDataFields().get(2) >> 8);
+                            double temperature = unsignedTemp > 128 ? unsignedTemp - 256 : unsignedTemp + (beacon.getExtraDataFields().get(2) & 0xff) / 256.0;
+                            logthis("I see a beacon transmitting a tlm temp: " + temperature +
+                                    " approximately " + beacon.getDistance() + " meters away.");
+                    }  else {
+                        //no clue what we found here.
+                        logthis("found a beacon, (not eddy) " + beacon.toString() + " and is approximately " + beacon.getDistance() + "meters away");
+                    }
+
+                }
+            }
+        });
+        beaconManager.startRangingBeacons(myRegion);
+    }
+
+
+
+    /**
+     * helper method to send strings to both the logcat and to a textview call logger.
+     */
+    private void logthis(String item) {
+        Log.v(TAG, item);
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                logger.append("\n" + item);
+            }
+        });
+    }
+
+    @Override
+    protected void onStop() {
+        beaconManager.stopMonitoring( myRegion );
+        beaconManager.stopRangingBeacons( myRegion );
+        super.onStop();
+    }
+
+
+    /**
+     * below is all the pieces to get the permissions setup correctly and basically have nothing to do with beacons
+     * See the manifest file for all the permissions this app is using.
+     */
+    private ActivityResultLauncher<String[]> mPermissionResult = registerForActivityResult(
+            new ActivityResultContracts.RequestMultiplePermissions(),
+            new ActivityResultCallback<Map<String, Boolean>>() {
+                @Override
+                public void onActivityResult(Map<String, Boolean> result) {
+                    for (Map.Entry<String, Boolean> entry : result.entrySet()) {
+                        Log.wtf(TAG, entry.getKey() + " " + entry.getValue());
+                        startexample();
+                    }
+                }
+            });
+
+    //until this runs as api31, don't know if needs scan or connect, so just leaving it.
+    void checkpermissions() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            if ((ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) ||
+                    (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) ||
+                    (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED)) {
+                mPermissionResult.launch(new String[]{Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.ACCESS_FINE_LOCATION});
+                logthis("Android 12: Asking for  have permissions ");
+            } else {
+                logthis("Android 12: We have permissions ");
+                startexample();
+            }
+
+        } else if ((ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) ||
+                (ContextCompat.checkSelfPermission(this, Manifest.permission.FOREGROUND_SERVICE) != PackageManager.PERMISSION_GRANTED) ||
+                (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION) != PackageManager.PERMISSION_GRANTED)) {
+            //I'm on not explaining why, just asking for permission.
+            mPermissionResult.launch(new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.FOREGROUND_SERVICE, Manifest.permission.ACCESS_BACKGROUND_LOCATION});
+        } else {
+            logthis("We have permissions ");
+        }
+    }
+
+}
